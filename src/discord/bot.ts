@@ -33,6 +33,8 @@ export class GeminiDiscordBot {
   private prefix: string;
   private voiceConnections: Map<string, VoiceConnectionManager>;
   private textChannels: Map<string, TextChannel>;
+  private sessionTimers: Map<string, NodeJS.Timeout>;
+  private sessionStartTimes: Map<string, number>;
 
   constructor(config: BotConfig) {
     this.client = new Client({
@@ -50,6 +52,8 @@ export class GeminiDiscordBot {
     this.prefix = config.prefix || "!gemini";
     this.voiceConnections = new Map();
     this.textChannels = new Map();
+    this.sessionTimers = new Map();
+    this.sessionStartTimes = new Map();
 
     this.setupEventHandlers();
   }
@@ -86,6 +90,22 @@ export class GeminiDiscordBot {
             break;
           case "lyra":
             await this.handleLyraCommand(message);
+            break;
+          case "stop":
+          case "interrupt":
+            await this.handleStopCommand(message);
+            break;
+          case "summarize":
+            await this.handleSummarizeCommand(message);
+            break;
+          case "define":
+            await this.handleDefineCommand(message);
+            break;
+          case "timer":
+            await this.handleTimerCommand(message);
+            break;
+          case "recap":
+            await this.handleRecapCommand(message);
             break;
           default:
             await message.reply(
@@ -132,7 +152,7 @@ export class GeminiDiscordBot {
     }
 
     try {
-      await message.reply("🔄 Joining voice channel and connecting to Gemini...");
+      await message.reply("🔄 Joining voice channel...");
 
       const connectionManager = new VoiceConnectionManager(
         voiceChannel as any,
@@ -174,14 +194,17 @@ export class GeminiDiscordBot {
       // Now connect
       await connectionManager.connect();
       this.voiceConnections.set(message.guild.id, connectionManager);
+      
+      // Track session start time
+      this.sessionStartTimes.set(message.guild.id, Date.now());
 
       await message.reply(
-        `✅ Joined ${voiceChannel.name} and connected to Gemini!\n\n` +
+        `✅ Joined ${voiceChannel.name}!\n\n` +
         `**How it works:**\n` +
         `🎙️ **Voice:** Speak your questions → Brief summary in voice\n` +
         `📄 **Text:** Detailed analysis appears automatically here\n` +
-        `💬 **Manual:** Use \`${this.prefix} lyra <question>\` to ask via text\n\n` +
-        `**Example:** \`${this.prefix} lyra explain photosynthesis\``
+        `💬 **Manual:** Use \`${this.prefix}<question>\` to ask via text\n\n` +
+        `**Example:** \`${this.prefix}explain photosynthesis\``
       );
 
       console.log(`✅ Bot [${guildId}]: Setup complete`);
@@ -229,7 +252,7 @@ export class GeminiDiscordBot {
       console.log(`✅ Bot [${guildId}]: Sent embed (${cleanAnalysis.length} chars)`);
 
       // If analysis is longer than embed limit, send remainder in code blocks
-      if (cleanAnalysis.length > 4096) {
+      if (cleanAnalysis.length > 4095) {
         console.log(`📄 Bot [${guildId}]: Sending overflow content...`);
         const remaining = cleanAnalysis.substring(4096);
         const chunks = remaining.match(/.{1,1900}/gs) || [];
@@ -263,6 +286,15 @@ export class GeminiDiscordBot {
       connectionManager.disconnect();
       this.voiceConnections.delete(message.guild.id);
       this.textChannels.delete(message.guild.id);
+      
+      // Clear timers and session data
+      const timer = this.sessionTimers.get(message.guild.id);
+      if (timer) {
+        clearTimeout(timer);
+        this.sessionTimers.delete(message.guild.id);
+      }
+      this.sessionStartTimes.delete(message.guild.id);
+      
       console.log(`👋 Bot [${message.guild.id}]: Disconnected and cleaned up`);
       await message.reply("👋 Left the voice channel and disconnected from Gemini.");
     } catch (error) {
@@ -277,11 +309,37 @@ export class GeminiDiscordBot {
       .setDescription("An AI study partner that joins voice calls to help you learn")
       .addFields(
         {
-          name: "Commands",
+          name: "📢 Voice Control",
           value: 
             `\`${this.prefix} join\` - Join your voice channel\n` +
             `\`${this.prefix} leave\` - Leave the voice channel\n` +
-            `\`${this.prefix} lyra <question>\` - Ask a question via text\n` +
+            `\`${this.prefix} stop\` - Stop talking immediately\n` +
+            `\`${this.prefix} interrupt\` - Same as stop`,
+        },
+        {
+          name: "💬 Question Commands",
+          value:
+            `\`${this.prefix} explain <question>\` - Ask a question via text\n` +
+            `\`${this.prefix} define <concept>\` - Get a clear definition\n` +
+            `**Example:** \`${this.prefix} define photosynthesis\``,
+        },
+        {
+          name: "📝 Study Tools",
+          value:
+            `\`${this.prefix} summarize\` - Generate study notes from discussion\n` +
+            `\`${this.prefix} summarize brief\` - Short bullet point summary\n` +
+            `\`${this.prefix} summarize detailed\` - Comprehensive summary\n` +
+            `\`${this.prefix} recap\` - End-of-session summary with insights`,
+        },
+        {
+          name: "⏰ Time Management",
+          value:
+            `\`${this.prefix} timer <minutes>\` - Start a study timer (Pomodoro)\n` +
+            `**Example:** \`${this.prefix} timer 25\` for 25-minute session`,
+        },
+        {
+          name: "ℹ️ Info",
+          value:
             `\`${this.prefix} status\` - Check bot status\n` +
             `\`${this.prefix} test\` - Run audio tests\n` +
             `\`${this.prefix} help\` - Show this message`,
@@ -293,18 +351,11 @@ export class GeminiDiscordBot {
             "2️⃣ Use `!gemini join` to invite Lyra\n" +
             "3️⃣ **Speak:** Ask questions in voice → Get brief audio summaries\n" +
             "4️⃣ **Read:** Detailed explanations appear automatically in this chat\n" +
-            "5️⃣ **Type:** Use `!gemini lyra <question>` for text queries",
-        },
-        {
-          name: "Examples",
-          value:
-            `\`${this.prefix} lyra explain photosynthesis\`\n` +
-            `\`${this.prefix} lyra what is the Pythagorean theorem?\`\n` +
-            `\`${this.prefix} lyra help me understand DNA replication\``,
+            "5️⃣ **Type:** Use commands above for text-based interactions",
         }
       )
       .setColor(0x5865F2)
-      .setFooter({ text: "Check console for detailed event logs during operation" });
+      .setFooter({ text: "All commands start with !lyra (or your custom prefix)" });
 
     await message.reply({ embeds: [helpEmbed] });
   }
@@ -397,7 +448,7 @@ export class GeminiDiscordBot {
       if (!query) {
         await message.reply(
           `💬 Please provide a question or topic.\n` +
-          `**Example:** \`${this.prefix} lyra explain photosynthesis\``
+          `**Example:** \`${this.prefix} explain photosynthesis\``
         );
         return;
       }
@@ -416,6 +467,225 @@ export class GeminiDiscordBot {
     }
   }
 
+  private async handleStopCommand(message: Message) {
+    if (!message.guild) {
+      await message.reply("This command can only be used in a server!");
+      return;
+    }
+
+    const connectionManager = this.voiceConnections.get(message.guild.id);
+
+    if (!connectionManager) {
+      await message.reply(`❌ I'm not in a voice channel! Use \`${this.prefix} join\` first.`);
+      return;
+    }
+
+    try {
+      console.log(`🛑 Bot [${message.guild.id}]: Stop command received`);
+      
+      // Interrupt current audio playback
+      const geminiClient = connectionManager.getGeminiClient();
+      geminiClient.interrupt();
+      
+      await message.reply("🛑 Stopped speaking and cleared audio queue.");
+      console.log(`✅ Bot [${message.guild.id}]: Successfully interrupted`);
+    } catch (error) {
+      console.error(`❌ Bot [${message.guild.id}]: Stop command error:`, error);
+      await message.reply("❌ Failed to stop playback.");
+    }
+  }
+
+  private async handleSummarizeCommand(message: Message) {
+    if (!message.guild) {
+      await message.reply("This command can only be used in a server!");
+      return;
+    }
+
+    const connectionManager = this.voiceConnections.get(message.guild.id);
+
+    if (!connectionManager) {
+      await message.reply(`❌ I'm not in a voice channel! Use \`${this.prefix} join\` first.`);
+      return;
+    }
+
+    try {
+      const args = message.content.slice(this.prefix.length).trim().split(/ +/);
+      args.shift(); // Remove 'summarize'
+      const detailLevel = args[0]?.toLowerCase() || "standard";
+
+      let prompt = "Please summarize our discussion so far into clear, organized study notes.";
+      
+      if (detailLevel === "brief") {
+        prompt = "Please provide a brief, high-level summary of our discussion in bullet points.";
+      } else if (detailLevel === "detailed") {
+        prompt = "Please provide a comprehensive, detailed summary of our discussion with explanations and examples.";
+      }
+
+      console.log(`📝 Bot [${message.guild.id}]: Summarize request (${detailLevel} mode)`);
+      await message.reply(`📝 Generating ${detailLevel} summary...`);
+
+      const geminiClient = connectionManager.getGeminiClient();
+      geminiClient.send([{ text: prompt }], true);
+
+      console.log(`✅ Bot [${message.guild.id}]: Summary request sent to Gemini`);
+    } catch (error) {
+      console.error(`❌ Bot [${message.guild.id}]: Summarize command error:`, error);
+      await message.reply("❌ Failed to generate summary.");
+    }
+  }
+
+  private async handleDefineCommand(message: Message) {
+    if (!message.guild) {
+      await message.reply("This command can only be used in a server!");
+      return;
+    }
+
+    const connectionManager = this.voiceConnections.get(message.guild.id);
+
+    if (!connectionManager) {
+      await message.reply(`❌ I'm not in a voice channel! Use \`${this.prefix} join\` first.`);
+      return;
+    }
+
+    try {
+      const args = message.content.slice(this.prefix.length).trim().split(/ +/);
+      args.shift(); // Remove 'define'
+      const concept = args.join(' ');
+
+      if (!concept) {
+        await message.reply(
+          `💬 Please provide a term or concept to define.\n` +
+          `**Example:** \`${this.prefix} define mitochondria\``
+        );
+        return;
+      }
+
+      const prompt = `Please provide a clear and concise definition of: ${concept}`;
+
+      console.log(`📖 Bot [${message.guild.id}]: Define request for "${concept}"`);
+      await message.reply(`📖 Defining: "${concept}"`);
+
+      const geminiClient = connectionManager.getGeminiClient();
+      geminiClient.send([{ text: prompt }], true);
+
+      console.log(`✅ Bot [${message.guild.id}]: Define request sent to Gemini`);
+    } catch (error) {
+      console.error(`❌ Bot [${message.guild.id}]: Define command error:`, error);
+      await message.reply("❌ Failed to process definition request.");
+    }
+  }
+
+  private async handleTimerCommand(message: Message) {
+    if (!message.guild) {
+      await message.reply("This command can only be used in a server!");
+      return;
+    }
+
+    const connectionManager = this.voiceConnections.get(message.guild.id);
+
+    if (!connectionManager) {
+      await message.reply(`❌ I'm not in a voice channel! Use \`${this.prefix} join\` first.`);
+      return;
+    }
+
+    try {
+      const args = message.content.slice(this.prefix.length).trim().split(/ +/);
+      args.shift(); // Remove 'timer'
+      const minutes = parseInt(args[0]);
+
+      if (!minutes || minutes <= 0 || minutes > 120) {
+        await message.reply(
+          `⏰ Please provide a valid time in minutes (1-120).\n` +
+          `**Example:** \`${this.prefix} timer 25\` for a 25-minute Pomodoro session`
+        );
+        return;
+      }
+
+      // Clear any existing timer for this guild
+      const existingTimer = this.sessionTimers.get(message.guild.id);
+      if (existingTimer) {
+        clearTimeout(existingTimer);
+      }
+
+      const userId = message.author.id;
+      console.log(`⏰ Bot [${message.guild.id}]: Timer set for ${minutes} minutes by user ${userId}`);
+      await message.reply(`⏰ ${minutes}-minute study timer started! I'll notify you when it's time for a break.`);
+
+      // Set new timer
+      const timer = setTimeout(async () => {
+        const textChannel = this.textChannels.get(message.guild.id);
+        if (textChannel) {
+          const embed = new EmbedBuilder()
+            .setTitle("⏰ Time's Up!")
+            .setDescription(
+              `<@${userId}> Your ${minutes}-minute study session is complete!\n\n` +
+              `🧘 Take a 5-minute break to rest your mind.\n` +
+              `💧 Hydrate and stretch!\n\n` +
+              `Use \`${this.prefix} timer <minutes>\` to start another session.`
+            )
+            .setColor(0xFFAA00)
+            .setTimestamp();
+
+          await textChannel.send({ embeds: [embed] });
+        }
+        this.sessionTimers.delete(message.guild.id);
+      }, minutes * 60 * 1000);
+
+      this.sessionTimers.set(message.guild.id, timer);
+    } catch (error) {
+      console.error(`❌ Bot [${message.guild.id}]: Timer command error:`, error);
+      await message.reply("❌ Failed to set timer.");
+    }
+  }
+
+  private async handleRecapCommand(message: Message) {
+    if (!message.guild) {
+      await message.reply("This command can only be used in a server!");
+      return;
+    }
+
+    const connectionManager = this.voiceConnections.get(message.guild.id);
+
+    if (!connectionManager) {
+      await message.reply(`❌ I'm not in a voice channel! Use \`${this.prefix} join\` first.`);
+      return;
+    }
+
+    try {
+      const sessionStart = this.sessionStartTimes.get(message.guild.id);
+      const sessionDuration = sessionStart 
+        ? Math.floor((Date.now() - sessionStart) / 60000) // minutes
+        : 0;
+
+      const prompt = 
+        "Please provide an end-of-session recap that includes:\n" +
+        "1. Main topics we covered\n" +
+        "2. Key concepts discussed\n" +
+        "3. Number of questions asked\n" +
+        "4. Any practice problems or quizzes completed\n" +
+        "5. Suggested next steps for continued learning\n\n" +
+        "Format this as a comprehensive study session summary.";
+
+      console.log(`📊 Bot [${message.guild.id}]: Recap request (session: ${sessionDuration} min)`);
+      
+      const embed = new EmbedBuilder()
+        .setTitle("📊 Generating Session Recap...")
+        .setDescription(`Session Duration: ${sessionDuration} minutes`)
+        .setColor(0x5865F2)
+        .setTimestamp();
+
+      await message.reply({ embeds: [embed] });
+
+      const geminiClient = connectionManager.getGeminiClient();
+      geminiClient.send([{ text: prompt }], true);
+
+      console.log(`✅ Bot [${message.guild.id}]: Recap request sent to Gemini`);
+    } catch (error) {
+      console.error(`❌ Bot [${message.guild.id}]: Recap command error:`, error);
+      await message.reply("❌ Failed to generate session recap.");
+    }
+  }
+
   private async handleVoiceStateUpdate(oldState: VoiceState, newState: VoiceState) {
     // Handle bot being disconnected from voice
     if (oldState.member?.id === this.client.user?.id) {
@@ -426,6 +696,15 @@ export class GeminiDiscordBot {
           connectionManager.disconnect();
           this.voiceConnections.delete(guildId);
           this.textChannels.delete(guildId);
+          
+          // Clear any active timers
+          const timer = this.sessionTimers.get(guildId);
+          if (timer) {
+            clearTimeout(timer);
+            this.sessionTimers.delete(guildId);
+          }
+          this.sessionStartTimes.delete(guildId);
+          
           console.log(`👋 Bot [${guildId}]: Bot disconnected from voice`);
         }
       }
@@ -464,8 +743,16 @@ export class GeminiDiscordBot {
       connectionManager.disconnect();
     }
     
+    // Clear all timers
+    for (const [guildId, timer] of this.sessionTimers) {
+      clearTimeout(timer);
+      console.log(`🛑 Bot [${guildId}]: Cleared timer`);
+    }
+    
     this.voiceConnections.clear();
     this.textChannels.clear();
+    this.sessionTimers.clear();
+    this.sessionStartTimes.clear();
 
     this.client.destroy();
     console.log("🛑 Bot stopped.");

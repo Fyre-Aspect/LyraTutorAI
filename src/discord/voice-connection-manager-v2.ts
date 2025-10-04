@@ -304,6 +304,23 @@ export class VoiceConnectionManager {
     
     return Math.sqrt(sum / samples);
   }
+  public stopPlayback() {
+  console.log("🛑 VCM: Stopping playback");
+  
+  // Clear the audio queue
+  this.audioQueue = [];
+  
+  // Stop the audio player
+  if (this.audioPlayer) {
+    this.audioPlayer.stop();
+  }
+  
+  // Reset playing state
+  this.isPlaying = false;
+  this.responseInProgress = false;
+  
+  console.log("✅ VCM: Playback stopped");
+}
 
   private async playNextAudio() {
     if (this.isPlaying || this.audioQueue.length === 0 || !this.audioPlayer) {
