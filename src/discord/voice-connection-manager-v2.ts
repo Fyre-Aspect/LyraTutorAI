@@ -16,7 +16,7 @@ import {
 } from "@discordjs/voice";
 import { VoiceChannel } from "discord.js";
 import { GenAILiveClient } from "@/lib/genai-live-client";
-import { LiveConnectConfig, Modality } from "@google/genai";
+import { LiveConnectConfig, Modality, Type } from "@google/genai";
 import { DiscordAudioProcessor } from "./audio-processor-v2";
 import { Readable } from "stream";
 import * as prism from "prism-media";
@@ -93,6 +93,78 @@ export class VoiceConnectionManager {
         console.log("⏸️ Allowing current response to finish...");
       }
     });
+
+    // Handle tool calls (function calling)
+    this.geminiClient.on("toolcall", async (toolCall) => {
+      console.log("🔧 Tool call received:", JSON.stringify(toolCall, null, 2));
+      
+      if (toolCall.functionCalls && toolCall.functionCalls.length > 0) {
+        for (const functionCall of toolCall.functionCalls) {
+          if (functionCall.name === "send_chat_message" && functionCall.id) {
+            await this.handleSendChatMessage({
+              id: functionCall.id,
+              name: functionCall.name,
+              args: functionCall.args,
+            });
+          }
+        }
+      }
+    });
+  }
+
+  /**
+   * Handle send_chat_message tool call from Gemini
+   */
+  private async handleSendChatMessage(functionCall: { id: string; name: string; args?: Record<string, unknown> }) {
+    try {
+      const args = functionCall.args || {};
+      const message = args.message || "";
+      
+      if (!message) {
+        console.error("❌ send_chat_message called without message");
+        return;
+      }
+
+      console.log("💬 Sending chat message:", message);
+      
+      // Send the message to Discord
+      await this.channel.send(`🤖 ${message}`);
+      console.log("✅ Chat message sent successfully");
+      
+      // Send tool response back to Gemini
+      await this.geminiClient.sendToolResponse({
+        functionResponses: [
+          {
+            id: functionCall.id,
+            name: functionCall.name,
+            response: {
+              success: true,
+              message: "Message sent successfully to Discord",
+            },
+          },
+        ],
+      });
+    } catch (error) {
+      console.error("❌ Error handling send_chat_message:", error);
+      
+      // Send error response back to Gemini
+      try {
+        await this.geminiClient.sendToolResponse({
+          functionResponses: [
+            {
+              id: functionCall.id,
+              name: functionCall.name,
+              response: {
+                success: false,
+                error: String(error),
+              },
+            },
+          ],
+        });
+      } catch (sendError) {
+        console.error("❌ Error sending tool response:", sendError);
+      }
+    }
   }
 
   public async connect() {
@@ -138,13 +210,33 @@ export class VoiceConnectionManager {
     // Set up receiving audio from Discord users
     this.setupAudioReceiving();
 
-    // Connect to Gemini
+    // Connect to Gemini with tool (function calling) support
     await this.geminiClient.connect(this.model, {
       ...this.liveConfig,
       generationConfig: {
         ...this.liveConfig.generationConfig,
         responseModalities: [Modality.AUDIO],
       },
+      tools: [
+        {
+          functionDeclarations: [
+            {
+              name: "send_chat_message",
+              description: "Send a text message to the Discord chat channel. Use this when you want to share information that's better displayed as text, like links, code snippets, lists, or when the user explicitly asks you to send a message in chat.",
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  message: {
+                    type: Type.STRING,
+                    description: "The text message to send to the Discord chat channel",
+                  },
+                },
+                required: ["message"],
+              },
+            },
+          ],
+        },
+      ],
     });
 
     console.log("✅ Connected to Gemini API");
