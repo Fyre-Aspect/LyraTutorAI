@@ -35,6 +35,13 @@ export class VoiceConnectionManager {
   // Audio queue for playing Gemini responses
   private audioQueue: Buffer[] = [];
   private isPlaying: boolean = false;
+  
+  // Noise filtering and debouncing
+  private userAudioBuffers: Map<string, { chunks: Buffer[], timer: NodeJS.Timeout | null, totalSamples: number }> = new Map();
+  private readonly MIN_AUDIO_DURATION_MS = 500; // Reduced from 800ms - ignore very short bursts
+  private readonly DEBOUNCE_MS = 800; // Reduced from 1500ms - faster response
+  private readonly MIN_RMS_THRESHOLD = 400; // Reduced from 500 - slightly more sensitive
+  private responseInProgress = false; // Track if bot is currently responding
 
   constructor(
     channel: VoiceChannel,
@@ -80,10 +87,11 @@ export class VoiceConnectionManager {
     });
 
     this.geminiClient.on("interrupted", () => {
-      console.log("Gemini interrupted - clearing audio queue");
-      this.audioQueue = [];
-      this.audioPlayer?.stop();
-      this.isPlaying = false;
+      console.log("⚠️ Gemini interrupted - someone spoke during response");
+      // Don't immediately clear - let current audio finish unless it's been >2 seconds
+      if (this.responseInProgress) {
+        console.log("⏸️ Allowing current response to finish...");
+      }
     });
   }
 
@@ -116,6 +124,7 @@ export class VoiceConnectionManager {
       if (newState.status === 'idle' && oldState.status !== 'idle') {
         // Audio finished playing
         this.isPlaying = false;
+        this.responseInProgress = false; // Response complete
         this.playNextAudio();
       }
     });
@@ -154,17 +163,32 @@ export class VoiceConnectionManager {
       const audioStream = receiver.subscribe(userId, {
         end: {
           behavior: EndBehaviorType.AfterSilence,
-          duration: 1000, // 1 second of silence
+          duration: 1200, // Reduced from 2500ms - 1.2s is good balance
         },
       });
 
-      // Process the audio stream
-      this.processUserAudio(userId, audioStream);
+      // Process the audio stream with debouncing
+      this.processUserAudioDebounced(userId, audioStream);
     });
   }
 
-  private async processUserAudio(userId: string, audioStream: Readable) {
+  /**
+   * Process audio with debouncing and noise filtering
+   */
+  private async processUserAudioDebounced(userId: string, audioStream: Readable) {
     try {
+      // Get or create buffer for this user
+      let userBuffer = this.userAudioBuffers.get(userId);
+      if (!userBuffer) {
+        userBuffer = { chunks: [], timer: null, totalSamples: 0 };
+        this.userAudioBuffers.set(userId, userBuffer);
+      }
+
+      // Clear existing timer
+      if (userBuffer.timer) {
+        clearTimeout(userBuffer.timer);
+      }
+
       // Discord sends Opus audio, we need to decode it to PCM
       const decoder = new prism.opus.Decoder({
         rate: 48000,
@@ -172,35 +196,25 @@ export class VoiceConnectionManager {
         frameSize: 960,
       });
 
-      // Pipe the audio through the decoder
       audioStream.pipe(decoder);
 
-      const chunks: Buffer[] = [];
-
       decoder.on("data", (chunk: Buffer) => {
-        chunks.push(chunk);
+        userBuffer!.chunks.push(chunk);
+        userBuffer!.totalSamples += chunk.length / 4; // 2 bytes per sample, 2 channels
       });
 
       decoder.on("end", async () => {
-        if (chunks.length === 0) return;
+        if (userBuffer!.chunks.length === 0) return;
 
-        // Combine all chunks
-        const fullBuffer = Buffer.concat(chunks);
-        
-        // Convert to the format Gemini expects (16kHz, mono, PCM16)
-        const processedAudio = await this.audioProcessor.convertDiscordToGemini(
-          fullBuffer
-        );
+        // OPTIMIZATION: If bot is idle and not responding, process immediately with shorter debounce
+        const debounceTime = this.isPlaying || this.responseInProgress 
+          ? this.DEBOUNCE_MS // Full debounce if bot is talking
+          : Math.min(this.DEBOUNCE_MS, 400); // Faster (400ms) if bot is idle
 
-        // Send to Gemini
-        this.geminiClient.sendRealtimeInput([
-          {
-            mimeType: "audio/pcm",
-            data: processedAudio,
-          },
-        ]);
-
-        console.log(`📤 Sent ${processedAudio.length} bytes of audio to Gemini`);
+        // Set debounce timer - wait for user to finish speaking
+        userBuffer!.timer = setTimeout(async () => {
+          await this.processFinalAudio(userId);
+        }, debounceTime);
       });
 
       decoder.on("error", (error: Error) => {
@@ -209,6 +223,78 @@ export class VoiceConnectionManager {
     } catch (error) {
       console.error("Error processing user audio:", error);
     }
+  }
+
+  /**
+   * Process the final buffered audio after debounce period
+   */
+  private async processFinalAudio(userId: string) {
+    const userBuffer = this.userAudioBuffers.get(userId);
+    if (!userBuffer || userBuffer.chunks.length === 0) return;
+
+    try {
+      // Combine all chunks
+      const fullBuffer = Buffer.concat(userBuffer.chunks);
+      
+      // Calculate audio duration
+      const durationMs = (userBuffer.totalSamples / 48000) * 1000;
+      
+      // Filter out very short audio (likely noise/false triggers)
+      if (durationMs < this.MIN_AUDIO_DURATION_MS) {
+        console.log(`⚠️ Ignoring short audio from user ${userId} (${durationMs.toFixed(0)}ms)`);
+        this.userAudioBuffers.delete(userId);
+        return;
+      }
+
+      // Calculate RMS (volume) to filter quiet background noise
+      const rms = this.calculateRMS(fullBuffer);
+      if (rms < this.MIN_RMS_THRESHOLD) {
+        console.log(`⚠️ Ignoring quiet audio from user ${userId} (RMS: ${rms.toFixed(0)})`);
+        this.userAudioBuffers.delete(userId);
+        return;
+      }
+
+      console.log(`✅ Processing ${durationMs.toFixed(0)}ms of audio from user ${userId} (RMS: ${rms.toFixed(0)})`);
+      
+      // Convert to the format Gemini expects (16kHz, mono, PCM16)
+      const processedAudio = await this.audioProcessor.convertDiscordToGemini(fullBuffer);
+
+      // Send to Gemini
+      this.geminiClient.sendRealtimeInput([
+        {
+          mimeType: "audio/pcm",
+          data: processedAudio,
+        },
+      ]);
+
+      console.log(`📤 Sent ${processedAudio.length} bytes of audio to Gemini`);
+      
+      // Mark that we're expecting a response
+      this.responseInProgress = true;
+
+    } catch (error) {
+      console.error("Error processing final audio:", error);
+    } finally {
+      // Clear the buffer
+      this.userAudioBuffers.delete(userId);
+    }
+  }
+
+  /**
+   * Calculate RMS (Root Mean Square) volume of audio
+   */
+  private calculateRMS(buffer: Buffer): number {
+    let sum = 0;
+    const samples = buffer.length / 4; // 2 bytes per sample, 2 channels
+    
+    for (let i = 0; i < buffer.length; i += 4) {
+      const left = buffer.readInt16LE(i);
+      const right = buffer.readInt16LE(i + 2);
+      const avg = (left + right) / 2;
+      sum += avg * avg;
+    }
+    
+    return Math.sqrt(sum / samples);
   }
 
   /**
@@ -274,9 +360,12 @@ export class VoiceConnectionManager {
 
       // Play the audio
       this.audioPlayer.play(resource);
+      
+      console.log(`🔊 Playing response (response in progress: ${this.responseInProgress})`);
     } catch (error) {
       console.error("Error playing audio in Discord:", error);
       this.isPlaying = false;
+      this.responseInProgress = false;
       // Try to play next chunk
       this.playNextAudio();
     }
@@ -286,6 +375,15 @@ export class VoiceConnectionManager {
     // Clear audio queue
     this.audioQueue = [];
     this.isPlaying = false;
+    this.responseInProgress = false;
+    
+    // Clear all user audio buffers and timers
+    for (const buffer of this.userAudioBuffers.values()) {
+      if (buffer.timer) {
+        clearTimeout(buffer.timer);
+      }
+    }
+    this.userAudioBuffers.clear();
 
     // Disconnect from Gemini
     if (this.geminiClient) {
