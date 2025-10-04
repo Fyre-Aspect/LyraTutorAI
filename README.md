@@ -69,9 +69,9 @@ An AI-powered study assistant that joins Discord group voice calls, answers ques
 
 ## 🎮 Commands
 
-- `!join` - Lyra joins your current voice channel and starts transcribing
-- `!leave` - Lyra leaves the voice channel
-- `!help` - Display available commands
+- `!lyra join` - Lyra joins your current voice channel and starts transcribing
+- `!lyra leave` - Lyra leaves the voice channel
+- `!lyra help` - Display available commands
 
 ## ✨ Current Features
 
