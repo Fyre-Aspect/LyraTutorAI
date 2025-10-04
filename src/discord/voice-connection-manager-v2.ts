@@ -1,6 +1,5 @@
 /**
- * IMPROVED Voice Connection Manager with proper audio streaming
- * Fixes the audio corruption issues
+ * Voice Connection Manager with proper response formatting integration
  */
 
 import {
@@ -16,8 +15,9 @@ import {
 } from "@discordjs/voice";
 import { VoiceChannel } from "discord.js";
 import { GenAILiveClient } from "@/lib/genai-live-client";
-import { LiveConnectConfig, Modality } from "@google/genai";
+import { LiveConnectConfig } from "@google/genai";
 import { DiscordAudioProcessor } from "./audio-processor-v2";
+import { ResponseFormatter } from "@/lib/response-formatter";
 import { Readable } from "stream";
 import * as prism from "prism-media";
 
@@ -30,18 +30,20 @@ export class VoiceConnectionManager {
   private model: string;
   private liveConfig: LiveConnectConfig;
   private isConnected: boolean = false;
-  private speakingUsers: Map<string, NodeJS.Timeout> = new Map();
   
-  // Audio queue for playing Gemini responses
   private audioQueue: Buffer[] = [];
   private isPlaying: boolean = false;
   
-  // Noise filtering and debouncing
-  private userAudioBuffers: Map<string, { chunks: Buffer[], timer: NodeJS.Timeout | null, totalSamples: number }> = new Map();
-  private readonly MIN_AUDIO_DURATION_MS = 500; // Reduced from 800ms - ignore very short bursts
-  private readonly DEBOUNCE_MS = 800; // Reduced from 1500ms - faster response
-  private readonly MIN_RMS_THRESHOLD = 400; // Reduced from 500 - slightly more sensitive
-  private responseInProgress = false; // Track if bot is currently responding
+  private userAudioBuffers: Map<string, { 
+    chunks: Buffer[], 
+    timer: NodeJS.Timeout | null, 
+    totalSamples: number 
+  }> = new Map();
+  
+  private readonly MIN_AUDIO_DURATION_MS = 500;
+  private readonly DEBOUNCE_MS = 800;
+  private readonly MIN_RMS_THRESHOLD = 400;
+  private responseInProgress = false;
 
   constructor(
     channel: VoiceChannel,
@@ -60,38 +62,56 @@ export class VoiceConnectionManager {
   }
 
   private setupGeminiListeners() {
+    // Audio streaming
     this.geminiClient.on("audio", (data: ArrayBuffer) => {
-      // When we receive audio from Gemini, queue it for playback
       const buffer = Buffer.from(data);
       this.audioQueue.push(buffer);
       
-      // Start playback as soon as we have some buffered audio (reduce latency)
-      const MIN_BUFFER_CHUNKS = 2; // Start after receiving 2 chunks
+      const MIN_BUFFER_CHUNKS = 2;
       if (!this.isPlaying && this.audioQueue.length >= MIN_BUFFER_CHUNKS) {
         this.playNextAudio();
       }
     });
 
+    // Response formatting events (logged but handled by bot.ts)
+    this.geminiClient.on("voiceResponse", (summary: string) => {
+      console.log(`🎙️ VCM: Voice summary ready (${summary.length} chars)`);
+    });
+
+    this.geminiClient.on("textResponse", (analysis: string) => {
+      console.log(`📄 VCM: Detailed analysis ready (${analysis.length} chars)`);
+    });
+
+    this.geminiClient.on("formattedResponse", (formatted) => {
+      console.log(`✅ VCM: Formatted response complete`);
+    });
+
+    this.geminiClient.on("content", (data: any) => {
+      console.log("📝 VCM: Content update");
+    });
+
+    this.geminiClient.on("turncomplete", () => {
+      console.log("✅ VCM: Turn complete");
+      this.responseInProgress = false;
+    });
+
     this.geminiClient.on("error", (error) => {
-      console.error("Gemini API error:", error);
+      console.error("❌ VCM: Gemini error:", error);
+      this.responseInProgress = false;
     });
 
     this.geminiClient.on("close", () => {
-      console.log("Gemini connection closed");
+      console.log("🔒 VCM: Gemini closed");
       this.isConnected = false;
     });
 
     this.geminiClient.on("open", () => {
-      console.log("Gemini connection opened");
+      console.log("🔓 VCM: Gemini opened");
       this.isConnected = true;
     });
 
     this.geminiClient.on("interrupted", () => {
-      console.log("⚠️ Gemini interrupted - someone spoke during response");
-      // Don't immediately clear - let current audio finish unless it's been >2 seconds
-      if (this.responseInProgress) {
-        console.log("⏸️ Allowing current response to finish...");
-      }
+      console.log("⚠️ VCM: Interrupted");
     });
   }
 
@@ -105,49 +125,64 @@ export class VoiceConnectionManager {
       selfMute: false,
     });
 
-    // Wait for the connection to be ready
     try {
       await entersState(this.voiceConnection, VoiceConnectionStatus.Ready, 30_000);
-      console.log("✅ Voice connection established");
+      console.log("✅ VCM: Voice connection established");
     } catch (error) {
-      console.error("Failed to establish voice connection:", error);
+      console.error("❌ VCM: Voice connection failed:", error);
       this.voiceConnection.destroy();
       throw error;
     }
 
-    // Create audio player for output
     this.audioPlayer = createAudioPlayer();
     this.voiceConnection.subscribe(this.audioPlayer);
 
-    // Listen for player state changes
     this.audioPlayer.on('stateChange', (oldState, newState) => {
       if (newState.status === 'idle' && oldState.status !== 'idle') {
-        // Audio finished playing
         this.isPlaying = false;
-        this.responseInProgress = false; // Response complete
         this.playNextAudio();
       }
     });
 
     this.audioPlayer.on('error', (error) => {
-      console.error('Audio player error:', error);
+      console.error('❌ VCM: Audio player error:', error);
       this.isPlaying = false;
       this.playNextAudio();
     });
 
-    // Set up receiving audio from Discord users
     this.setupAudioReceiving();
 
-    // Connect to Gemini
-    await this.geminiClient.connect(this.model, {
-      ...this.liveConfig,
-      generationConfig: {
-        ...this.liveConfig.generationConfig,
-        responseModalities: [Modality.AUDIO],
-      },
-    });
+    // Use ResponseFormatter system prompt
+    const systemPrompt = ResponseFormatter.getSystemPrompt();
 
-    console.log("✅ Connected to Gemini API");
+    // Proper Gemini 2.0 config
+    const connectConfig: LiveConnectConfig = {
+      model: this.model,
+      systemInstruction: {
+        parts: [{ text: systemPrompt }]
+      },
+      generationConfig: {
+        responseModalities: "audio",
+        speechConfig: {
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } }
+        }
+      }
+    };
+
+    console.log("🔌 VCM: Connecting to Gemini with response formatting");
+
+    try {
+      const connected = await this.geminiClient.connect(this.model, connectConfig);
+      
+      if (!connected) {
+        throw new Error("Failed to connect to Gemini");
+      }
+      
+      console.log("✅ VCM: Connected to Gemini successfully");
+    } catch (error) {
+      console.error("❌ VCM: Gemini connection failed:", error);
+      throw error;
+    }
   }
 
   private setupAudioReceiving() {
@@ -155,41 +190,32 @@ export class VoiceConnectionManager {
 
     const receiver = this.voiceConnection.receiver;
 
-    // Listen for users speaking
     receiver.speaking.on("start", (userId: string) => {
-      console.log(`🎤 User ${userId} started speaking`);
+      console.log(`🎤 VCM: User ${userId} started speaking`);
       
-      // Create audio stream for this user
       const audioStream = receiver.subscribe(userId, {
         end: {
           behavior: EndBehaviorType.AfterSilence,
-          duration: 1200, // Reduced from 2500ms - 1.2s is good balance
+          duration: 1200,
         },
       });
 
-      // Process the audio stream with debouncing
       this.processUserAudioDebounced(userId, audioStream);
     });
   }
 
-  /**
-   * Process audio with debouncing and noise filtering
-   */
   private async processUserAudioDebounced(userId: string, audioStream: Readable) {
     try {
-      // Get or create buffer for this user
       let userBuffer = this.userAudioBuffers.get(userId);
       if (!userBuffer) {
         userBuffer = { chunks: [], timer: null, totalSamples: 0 };
         this.userAudioBuffers.set(userId, userBuffer);
       }
 
-      // Clear existing timer
       if (userBuffer.timer) {
         clearTimeout(userBuffer.timer);
       }
 
-      // Discord sends Opus audio, we need to decode it to PCM
       const decoder = new prism.opus.Decoder({
         rate: 48000,
         channels: 2,
@@ -200,66 +226,54 @@ export class VoiceConnectionManager {
 
       decoder.on("data", (chunk: Buffer) => {
         userBuffer!.chunks.push(chunk);
-        userBuffer!.totalSamples += chunk.length / 4; // 2 bytes per sample, 2 channels
+        userBuffer!.totalSamples += chunk.length / 4;
       });
 
       decoder.on("end", async () => {
         if (userBuffer!.chunks.length === 0) return;
 
-        // OPTIMIZATION: If bot is idle and not responding, process immediately with shorter debounce
         const debounceTime = this.isPlaying || this.responseInProgress 
-          ? this.DEBOUNCE_MS // Full debounce if bot is talking
-          : Math.min(this.DEBOUNCE_MS, 400); // Faster (400ms) if bot is idle
+          ? this.DEBOUNCE_MS
+          : Math.min(this.DEBOUNCE_MS, 400);
 
-        // Set debounce timer - wait for user to finish speaking
         userBuffer!.timer = setTimeout(async () => {
           await this.processFinalAudio(userId);
         }, debounceTime);
       });
 
       decoder.on("error", (error: Error) => {
-        console.error("Error decoding audio:", error);
+        console.error("❌ VCM: Decoding error:", error);
       });
     } catch (error) {
-      console.error("Error processing user audio:", error);
+      console.error("❌ VCM: Processing error:", error);
     }
   }
 
-  /**
-   * Process the final buffered audio after debounce period
-   */
   private async processFinalAudio(userId: string) {
     const userBuffer = this.userAudioBuffers.get(userId);
     if (!userBuffer || userBuffer.chunks.length === 0) return;
 
     try {
-      // Combine all chunks
       const fullBuffer = Buffer.concat(userBuffer.chunks);
-      
-      // Calculate audio duration
       const durationMs = (userBuffer.totalSamples / 48000) * 1000;
       
-      // Filter out very short audio (likely noise/false triggers)
       if (durationMs < this.MIN_AUDIO_DURATION_MS) {
-        console.log(`⚠️ Ignoring short audio from user ${userId} (${durationMs.toFixed(0)}ms)`);
+        console.log(`⚠️ VCM: Ignoring short audio (${durationMs.toFixed(0)}ms)`);
         this.userAudioBuffers.delete(userId);
         return;
       }
 
-      // Calculate RMS (volume) to filter quiet background noise
       const rms = this.calculateRMS(fullBuffer);
       if (rms < this.MIN_RMS_THRESHOLD) {
-        console.log(`⚠️ Ignoring quiet audio from user ${userId} (RMS: ${rms.toFixed(0)})`);
+        console.log(`⚠️ VCM: Ignoring quiet audio (RMS: ${rms.toFixed(0)})`);
         this.userAudioBuffers.delete(userId);
         return;
       }
 
-      console.log(`✅ Processing ${durationMs.toFixed(0)}ms of audio from user ${userId} (RMS: ${rms.toFixed(0)})`);
+      console.log(`✅ VCM: Processing ${durationMs.toFixed(0)}ms (RMS: ${rms.toFixed(0)})`);
       
-      // Convert to the format Gemini expects (16kHz, mono, PCM16)
       const processedAudio = await this.audioProcessor.convertDiscordToGemini(fullBuffer);
 
-      // Send to Gemini
       this.geminiClient.sendRealtimeInput([
         {
           mimeType: "audio/pcm",
@@ -267,25 +281,19 @@ export class VoiceConnectionManager {
         },
       ]);
 
-      console.log(`📤 Sent ${processedAudio.length} bytes of audio to Gemini`);
-      
-      // Mark that we're expecting a response
+      console.log(`📤 VCM: Sent ${processedAudio.length} bytes to Gemini`);
       this.responseInProgress = true;
 
     } catch (error) {
-      console.error("Error processing final audio:", error);
+      console.error("❌ VCM: Final audio processing error:", error);
     } finally {
-      // Clear the buffer
       this.userAudioBuffers.delete(userId);
     }
   }
 
-  /**
-   * Calculate RMS (Root Mean Square) volume of audio
-   */
   private calculateRMS(buffer: Buffer): number {
     let sum = 0;
-    const samples = buffer.length / 4; // 2 bytes per sample, 2 channels
+    const samples = buffer.length / 4;
     
     for (let i = 0; i < buffer.length; i += 4) {
       const left = buffer.readInt16LE(i);
@@ -297,9 +305,6 @@ export class VoiceConnectionManager {
     return Math.sqrt(sum / samples);
   }
 
-  /**
-   * IMPROVED: Buffer audio chunks and play as continuous stream
-   */
   private async playNextAudio() {
     if (this.isPlaying || this.audioQueue.length === 0 || !this.audioPlayer) {
       return;
@@ -308,76 +313,66 @@ export class VoiceConnectionManager {
     this.isPlaying = true;
 
     try {
-      // Collect all queued audio chunks into one continuous buffer
       const allChunks: Buffer[] = [];
       while (this.audioQueue.length > 0) {
         const geminiAudioChunk = this.audioQueue.shift()!;
-        
-        // Convert each Gemini chunk (24kHz mono) to Discord format (48kHz stereo)
         const discordAudio = this.audioProcessor.convertGeminiToDiscord(
           new Uint8Array(geminiAudioChunk)
         );
-        
         allChunks.push(discordAudio);
       }
 
-      // Concatenate all chunks into one continuous buffer
       const continuousAudio = Buffer.concat(allChunks);
       
-      console.log(`🔊 Playing ${continuousAudio.length} bytes of continuous audio in Discord`);
+      console.log(`🔊 VCM: Playing ${continuousAudio.length} bytes`);
 
-      // CRITICAL: Create a proper continuous Opus stream for Discord
       const encoder = new prism.opus.Encoder({
         rate: 48000,
         channels: 2,
         frameSize: 960,
       });
 
-      // Create a readable stream that pushes data in proper chunks
-      const CHUNK_SIZE = 3840; // 960 samples * 2 channels * 2 bytes = 3840 bytes per frame
+      const CHUNK_SIZE = 3840;
       let offset = 0;
 
       const pcmStream = new Readable({
         read() {
           if (offset < continuousAudio.length) {
-            const chunk = continuousAudio.slice(offset, Math.min(offset + CHUNK_SIZE, continuousAudio.length));
+            const chunk = continuousAudio.slice(
+              offset, 
+              Math.min(offset + CHUNK_SIZE, continuousAudio.length)
+            );
             this.push(chunk);
             offset += CHUNK_SIZE;
           } else {
-            this.push(null); // End the stream
+            this.push(null);
           }
         }
       });
 
-      // Pipe PCM through Opus encoder
       const opusStream = pcmStream.pipe(encoder);
 
-      // Create audio resource with proper type
       const resource = createAudioResource(opusStream, {
         inputType: StreamType.Opus,
         inlineVolume: true,
       });
 
-      // Play the audio
       this.audioPlayer.play(resource);
-      
-      console.log(`🔊 Playing response (response in progress: ${this.responseInProgress})`);
     } catch (error) {
-      console.error("Error playing audio in Discord:", error);
+      console.error("❌ VCM: Playback error:", error);
       this.isPlaying = false;
       this.responseInProgress = false;
-      // Try to play next chunk
       this.playNextAudio();
     }
   }
 
   public disconnect() {
-    // Clear audio queue
+    console.log("🛑 VCM: Disconnecting");
+    
     this.audioQueue = [];
     this.isPlaying = false;
     this.responseInProgress = false;
     
-    // Clear all user audio buffers and timers
     for (const buffer of this.userAudioBuffers.values()) {
       if (buffer.timer) {
         clearTimeout(buffer.timer);
@@ -385,23 +380,20 @@ export class VoiceConnectionManager {
     }
     this.userAudioBuffers.clear();
 
-    // Disconnect from Gemini
     if (this.geminiClient) {
       this.geminiClient.disconnect();
     }
 
-    // Stop the audio player
     if (this.audioPlayer) {
       this.audioPlayer.stop();
     }
 
-    // Destroy the voice connection
     if (this.voiceConnection) {
       this.voiceConnection.destroy();
     }
 
     this.isConnected = false;
-    console.log("👋 Disconnected from voice channel and Gemini");
+    console.log("👋 VCM: Disconnected");
   }
 
   public getStatus() {
@@ -416,6 +408,11 @@ export class VoiceConnectionManager {
   }
 
   public isActive(): boolean {
-    return this.isConnected && this.voiceConnection?.state.status === VoiceConnectionStatus.Ready;
+    return this.isConnected && 
+           this.voiceConnection?.state.status === VoiceConnectionStatus.Ready;
+  }
+
+  public getGeminiClient(): GenAILiveClient {
+    return this.geminiClient;
   }
 }

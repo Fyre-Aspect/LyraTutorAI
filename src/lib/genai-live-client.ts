@@ -1,17 +1,6 @@
 /**
  * Copyright 2024 Google LLC
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Enhanced with detailed logging for debugging
  */
 
 import {
@@ -29,46 +18,30 @@ import {
 } from "@google/genai";
 
 import { EventEmitter } from "eventemitter3";
-import { difference } from "lodash";
-import { LiveClientOptions, StreamingLog } from "../types";
+import { difference } from "lodash";  
+import { LiveClientOptions, StreamingLog, FormattedResponse } from "../types";
 import { base64ToArrayBuffer } from "./utils";
+import { ResponseFormatter } from "./response-formatter";
 
-/**
- * Event types that can be emitted by the MultimodalLiveClient.
- * Each event corresponds to a specific message from GenAI or client state change.
- */
 export interface LiveClientEventTypes {
-  // Emitted when audio data is received
   audio: (data: ArrayBuffer) => void;
-  // Emitted when the connection closes
   close: (event: CloseEvent) => void;
-  // Emitted when content is received from the server
   content: (data: LiveServerContent) => void;
-  // Emitted when an error occurs
   error: (error: ErrorEvent) => void;
-  // Emitted when the server interrupts the current generation
   interrupted: () => void;
-  // Emitted for logging events
   log: (log: StreamingLog) => void;
-  // Emitted when the connection opens
   open: () => void;
-  // Emitted when the initial setup is complete
   setupcomplete: () => void;
-  // Emitted when a tool call is received
   toolcall: (toolCall: LiveServerToolCall) => void;
-  // Emitted when a tool call is cancelled
   toolcallcancellation: (
     toolcallCancellation: LiveServerToolCallCancellation
   ) => void;
-  // Emitted when the current turn is complete
   turncomplete: () => void;
+  voiceResponse: (summary: string) => void;
+  textResponse: (analysis: string) => void;
+  formattedResponse: (formatted: FormattedResponse) => void;
 }
 
-/**
- * A event-emitting class that manages the connection to the websocket and emits
- * events to the rest of the application.
- * If you dont want to use react you can still use this.
- */
 export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
   protected client: GoogleGenAI;
 
@@ -88,6 +61,9 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
   }
 
   protected config: LiveConnectConfig | null = null;
+
+  // Buffer for accumulating text content
+  private textBuffer: string = "";
 
   public getConfig() {
     return { ...this.config };
@@ -120,6 +96,9 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
     this._status = "connecting";
     this.config = config;
     this._model = model;
+    this.textBuffer = "";
+
+    console.log("🔌 GenAILiveClient connecting...");
 
     const callbacks: LiveCallbacks = {
       onopen: this.onopen,
@@ -134,8 +113,9 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
         config,
         callbacks,
       });
+      console.log("✅ GenAILiveClient session created");
     } catch (e) {
-      console.error("Error connecting to GenAI Live:", e);
+      console.error("❌ Error connecting to GenAI Live:", e);
       this._status = "disconnected";
       return false;
     }
@@ -151,18 +131,22 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
     this.session?.close();
     this._session = null;
     this._status = "disconnected";
+    this.textBuffer = "";
 
     this.log("client.close", `Disconnected`);
+    console.log("🔌 GenAILiveClient disconnected");
     return true;
   }
 
   protected onopen() {
     this.log("client.open", "Connected");
+    console.log("🔓 GenAILiveClient connection opened");
     this.emit("open");
   }
 
   protected onerror(e: ErrorEvent) {
     this.log("server.error", e.message);
+    console.error("❌ GenAILiveClient error:", e.message);
     this.emit("error", e);
   }
 
@@ -171,52 +155,78 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
       `server.close`,
       `disconnected ${e.reason ? `with reason: ${e.reason}` : ``}`
     );
+    console.log("🔒 GenAILiveClient connection closed:", e.reason || "no reason");
     this.emit("close", e);
   }
 
   protected async onmessage(message: LiveServerMessage) {
+    console.log("📨 GenAILiveClient received message, keys:", Object.keys(message));
+
     if (message.setupComplete) {
       this.log("server.send", "setupComplete");
+      console.log("✅ Setup complete");
       this.emit("setupcomplete");
       return;
     }
+
     if (message.toolCall) {
       this.log("server.toolCall", message);
+      console.log("🔧 Tool call received");
       this.emit("toolcall", message.toolCall);
       return;
     }
+
     if (message.toolCallCancellation) {
       this.log("server.toolCallCancellation", message);
+      console.log("🚫 Tool call cancellation");
       this.emit("toolcallcancellation", message.toolCallCancellation);
       return;
     }
 
-    // this json also might be `contentUpdate { interrupted: true }`
-    // or contentUpdate { end_of_turn: true }
     if (message.serverContent) {
       const { serverContent } = message;
+      console.log("📦 Server content received, keys:", Object.keys(serverContent));
+
       if ("interrupted" in serverContent) {
         this.log("server.content", "interrupted");
+        console.log("⚠️ Response interrupted");
         this.emit("interrupted");
+        this.textBuffer = "";
         return;
       }
+
       if ("turnComplete" in serverContent) {
         this.log("server.content", "turnComplete");
+        console.log("✅ Turn complete, text buffer length:", this.textBuffer.length);
+        
+        // Process accumulated text buffer when turn completes
+        if (this.textBuffer.trim()) {
+          console.log("📝 Processing accumulated text:", this.textBuffer.substring(0, 200) + "...");
+          this.processTextResponse(this.textBuffer);
+          this.textBuffer = "";
+        } else {
+          console.warn("⚠️ Turn complete but text buffer is empty!");
+        }
+        
         this.emit("turncomplete");
+        return;
       }
 
       if ("modelTurn" in serverContent) {
         let parts: Part[] = serverContent.modelTurn?.parts || [];
+        console.log("🤖 Model turn received with", parts.length, "parts");
 
-        // when its audio that is returned for modelTurn
+        // Process audio parts
         const audioParts = parts.filter(
           (p) => p.inlineData && p.inlineData.mimeType?.startsWith("audio/pcm")
         );
-        const base64s = audioParts.map((p) => p.inlineData?.data);
+        
+        if (audioParts.length > 0) {
+          console.log("🔊 Found", audioParts.length, "audio parts");
+        }
 
-        // strip the audio parts out of the modelTurn
+        const base64s = audioParts.map((p) => p.inlineData?.data);
         const otherParts = difference(parts, audioParts);
-        // console.log("otherParts", otherParts);
 
         base64s.forEach((b64) => {
           if (b64) {
@@ -225,24 +235,68 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
             this.log(`server.audio`, `buffer (${data.byteLength})`);
           }
         });
+
         if (!otherParts.length) {
+          console.log("ℹ️ No non-audio parts to process");
           return;
         }
 
         parts = otherParts;
+
+        // Accumulate text content
+        parts.forEach((part) => {
+          if (part.text) {
+            console.log("📝 Accumulating text chunk:", part.text.substring(0, 100) + "...");
+            this.textBuffer += part.text;
+          } else {
+            console.log("ℹ️ Part has no text:", Object.keys(part));
+          }
+        });
+
+        console.log("📊 Current text buffer length:", this.textBuffer.length);
 
         const content: { modelTurn: Content } = { modelTurn: { parts } };
         this.emit("content", content);
         this.log(`server.content`, message);
       }
     } else {
-      console.log("received unmatched message", message);
+      console.warn("⚠️ Received unmatched message:", message);
     }
   }
 
   /**
-   * send realtimeInput, this is base64 chunks of "audio/pcm" and/or "image/jpg"
+   * Process complete text response using ResponseFormatter
    */
+  private processTextResponse(text: string) {
+    console.log("🔄 Processing text response, length:", text.length);
+    console.log("📄 Full text preview:", text.substring(0, 300));
+
+    try {
+      const formatted = ResponseFormatter.formatResponse(text);
+      
+      console.log("✂️ Formatted response:");
+      console.log("  - Voice summary:", formatted.voiceSummary.substring(0, 100));
+      console.log("  - Detailed analysis length:", formatted.detailedAnalysis.length);
+      
+      // Emit separate events for voice and text
+      this.emit("voiceResponse", formatted.voiceSummary);
+      this.emit("textResponse", formatted.detailedAnalysis);
+      this.emit("formattedResponse", formatted);
+      
+      console.log("✅ Emitted all formatted response events");
+      
+      this.log("client.formattedResponse", {
+        voiceSummary: `${formatted.voiceSummary.substring(0, 50)}...`,
+        detailedAnalysis: `${formatted.detailedAnalysis.substring(0, 50)}...`,
+      });
+    } catch (error) {
+      console.error("❌ Error formatting response:", error);
+      // Fallback: emit original text for both
+      this.emit("voiceResponse", text.substring(0, 500));
+      this.emit("textResponse", text);
+    }
+  }
+
   sendRealtimeInput(chunks: Array<{ mimeType: string; data: string }>) {
     let hasAudio = false;
     let hasVideo = false;
@@ -267,11 +321,9 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
         ? "video"
         : "unknown";
     this.log(`client.realtimeInput`, message);
+    console.log("📤 Sent realtime input:", message);
   }
 
-  /**
-   *  send a response to a function call and provide the id of the functions you are responding to
-   */
   sendToolResponse(toolResponse: LiveClientToolResponse) {
     if (
       toolResponse.functionResponses &&
@@ -281,17 +333,16 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
         functionResponses: toolResponse.functionResponses,
       });
       this.log(`client.toolResponse`, toolResponse);
+      console.log("🔧 Sent tool response");
     }
   }
 
-  /**
-   * send normal content parts such as { text }
-   */
   send(parts: Part | Part[], turnComplete: boolean = true) {
     this.session?.sendClientContent({ turns: parts, turnComplete });
     this.log(`client.send`, {
       turns: Array.isArray(parts) ? parts : [parts],
       turnComplete,
     });
+    console.log("📤 Sent client content, turnComplete:", turnComplete);
   }
 }
