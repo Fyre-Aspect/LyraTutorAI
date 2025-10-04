@@ -1,0 +1,15 @@
+{
+  "description": "Configuration for the Gemini Discord Bot",
+  "model": "models/gemini-2.0-flash-exp",
+  "prefix": "!gemini",
+  "voice": "Puck",
+  "systemInstruction": "You are a helpful AI assistant in a Discord voice channel. Keep your responses concise and natural for voice conversation. You can hear multiple people speaking, so address them appropriately.",
+  "autoDisconnectTimeout": 300000,
+  "maxConcurrentConnections": 5,
+  "audioSettings": {
+    "inputSampleRate": 16000,
+    "outputSampleRate": 24000,
+    "channels": 1,
+    "silenceThreshold": 1000
+  }
+}
