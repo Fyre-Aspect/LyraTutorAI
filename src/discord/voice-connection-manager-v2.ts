@@ -18,7 +18,7 @@ import { VoiceChannel } from "discord.js";
 import { GenAILiveClient } from "@/lib/genai-live-client";
 import { LiveConnectConfig, Modality } from "@google/genai";
 import { DiscordAudioProcessor } from "./audio-processor-v2";
-import { Readable, PassThrough } from "stream";
+import { Readable } from "stream";
 import * as prism from "prism-media";
 
 export class VoiceConnectionManager {
@@ -58,7 +58,9 @@ export class VoiceConnectionManager {
       const buffer = Buffer.from(data);
       this.audioQueue.push(buffer);
       
-      if (!this.isPlaying) {
+      // Start playback as soon as we have some buffered audio (reduce latency)
+      const MIN_BUFFER_CHUNKS = 2; // Start after receiving 2 chunks
+      if (!this.isPlaying && this.audioQueue.length >= MIN_BUFFER_CHUNKS) {
         this.playNextAudio();
       }
     });
@@ -210,8 +212,7 @@ export class VoiceConnectionManager {
   }
 
   /**
-   * CRITICAL FIX: Properly play audio from Gemini
-   * The issue was creating individual streams per chunk instead of queueing
+   * IMPROVED: Buffer audio chunks and play as continuous stream
    */
   private async playNextAudio() {
     if (this.isPlaying || this.audioQueue.length === 0 || !this.audioPlayer) {
@@ -221,26 +222,44 @@ export class VoiceConnectionManager {
     this.isPlaying = true;
 
     try {
-      // Get the next audio chunk from queue
-      const geminiAudioChunk = this.audioQueue.shift()!;
-      
-      // Convert Gemini's PCM16 audio (24kHz mono) to Discord format (48kHz stereo)
-      const discordAudio = this.audioProcessor.convertGeminiToDiscord(
-        new Uint8Array(geminiAudioChunk)
-      );
+      // Collect all queued audio chunks into one continuous buffer
+      const allChunks: Buffer[] = [];
+      while (this.audioQueue.length > 0) {
+        const geminiAudioChunk = this.audioQueue.shift()!;
+        
+        // Convert each Gemini chunk (24kHz mono) to Discord format (48kHz stereo)
+        const discordAudio = this.audioProcessor.convertGeminiToDiscord(
+          new Uint8Array(geminiAudioChunk)
+        );
+        
+        allChunks.push(discordAudio);
+      }
 
-      // CRITICAL: Create a proper Opus stream for Discord
+      // Concatenate all chunks into one continuous buffer
+      const continuousAudio = Buffer.concat(allChunks);
+      
+      console.log(`🔊 Playing ${continuousAudio.length} bytes of continuous audio in Discord`);
+
+      // CRITICAL: Create a proper continuous Opus stream for Discord
       const encoder = new prism.opus.Encoder({
         rate: 48000,
         channels: 2,
         frameSize: 960,
       });
 
-      // Create a readable stream from the PCM data
+      // Create a readable stream that pushes data in proper chunks
+      const CHUNK_SIZE = 3840; // 960 samples * 2 channels * 2 bytes = 3840 bytes per frame
+      let offset = 0;
+
       const pcmStream = new Readable({
         read() {
-          this.push(discordAudio);
-          this.push(null); // End the stream
+          if (offset < continuousAudio.length) {
+            const chunk = continuousAudio.slice(offset, Math.min(offset + CHUNK_SIZE, continuousAudio.length));
+            this.push(chunk);
+            offset += CHUNK_SIZE;
+          } else {
+            this.push(null); // End the stream
+          }
         }
       });
 
@@ -250,12 +269,11 @@ export class VoiceConnectionManager {
       // Create audio resource with proper type
       const resource = createAudioResource(opusStream, {
         inputType: StreamType.Opus,
+        inlineVolume: true,
       });
 
       // Play the audio
       this.audioPlayer.play(resource);
-
-      console.log(`🔊 Playing ${discordAudio.length} bytes of audio in Discord`);
     } catch (error) {
       console.error("Error playing audio in Discord:", error);
       this.isPlaying = false;
