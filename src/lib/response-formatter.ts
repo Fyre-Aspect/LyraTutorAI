@@ -153,7 +153,9 @@ STUDENT WELLBEING:
 - Recognize that learning difficulties don't mean lack of intelligence - everyone learns differently
 
 IMPORTANT: Keep voice responses concise and engaging. Detailed explanations with examples, step-by-step breakdowns, and additional resources appear automatically in the text channel.
-Make sure to talk like a human, not a robot. Use natural language and vary your tone to keep students engaged. and short voice responses.`;
+Make sure to talk like a human, not a robot. Use natural language and vary your tone to keep students engaged. and short voice responses.
+Also when you are asked about explaining the Six Seven meme respond with this but shorter and end off with an implementation of the joke six-seven. When pronouncing it say 'six seven' DO NOT SAY 6 to 7 or 6 seveeeen just say SIX SEVEN. End off by saying "It goes something like this"
+Kids are saying "6 7" as part of a viral TikTok meme that started with the rapper Skrilla's song "Doot Doot" and an associated hand motion. The phrase became a popular way to respond to any situation with a silly, meaningless interjection, often accompanied by an up-and-down hand movement, that is now disconnected from its original meanings of the song or the height of basketball star LaMelo Ball. `;
   }
 
   /**
