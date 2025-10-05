@@ -212,7 +212,8 @@ export class GeminiDiscordBot {
 \`${this.prefix} status\` - Check bot status
 
 **Quiz Commands:**
-\`${this.prefix} quiz [topic]\` - Start a quiz on any topic
+\`${this.prefix} quiz [topic]\` - Start a 10-question quiz on any topic
+\`${this.prefix} quiz [topic] [number]\` - Start a quiz with custom number of questions (1-50)
 \`${this.prefix} quiz end\` - End your current quiz session
 
 **Other Commands:**
@@ -227,8 +228,9 @@ export class GeminiDiscordBot {
 
 **How to use Quiz:**
 1. Use \`${this.prefix} quiz [topic]\` to start (e.g., \`${this.prefix} quiz JavaScript\`)
-2. Reply to Lyra's messages with your answers
-3. Get instant feedback and learn as you go!
+2. Add a number for custom length (e.g., \`${this.prefix} quiz Python 5\`)
+3. Reply to Lyra's messages with your answers
+4. Get instant feedback and learn as you go!
     `;
 
     await message.reply(helpText);
@@ -288,16 +290,37 @@ export class GeminiDiscordBot {
     // Start a quiz with the given topic
     if (args.length === 0) {
       await message.reply(
-        `❌ Please specify a topic!\n\nUsage: \`${this.prefix} quiz [topic]\`\nExample: \`${this.prefix} quiz JavaScript\``
+        `❌ Please specify a topic!\n\nUsage: \`${this.prefix} quiz [topic] [number]\`\nExamples:\n- \`${this.prefix} quiz JavaScript\` (10 questions)\n- \`${this.prefix} quiz Python 5\` (5 questions)\n- \`${this.prefix} quiz History 20\` (20 questions)`
       );
       return;
     }
 
-    const topic = args.join(" ");
+    // Parse optional number of questions (can be first or last argument)
+    let numQuestions: number | undefined;
+    let topicArgs = [...args];
+    
+    // Check if last argument is a number
+    const lastArg = args[args.length - 1];
+    const lastArgNum = parseInt(lastArg, 10);
+    if (!isNaN(lastArgNum) && lastArgNum > 0) {
+      numQuestions = lastArgNum;
+      topicArgs = args.slice(0, -1);
+    }
+    
+    // If no topic left after removing number, show error
+    if (topicArgs.length === 0) {
+      await message.reply(
+        `❌ Please specify a topic!\n\nUsage: \`${this.prefix} quiz [topic] [number]\`\nExample: \`${this.prefix} quiz JavaScript 5\``
+      );
+      return;
+    }
+
+    const topic = topicArgs.join(" ");
     const response = await this.quizManager.startQuiz(
       message.author.id,
       message.channel.id,
-      topic
+      topic,
+      numQuestions
     );
     await message.reply(response);
   }

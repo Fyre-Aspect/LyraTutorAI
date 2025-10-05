@@ -13,6 +13,7 @@ interface QuizSession {
   currentQuestion: string;
   questionsAsked: number;
   correctAnswers: number;
+  maxQuestions: number;
   startTime: Date;
   lastMessageId?: string;
 }
@@ -20,7 +21,9 @@ interface QuizSession {
 export class QuizManager {
   private genAI: GoogleGenAI;
   private activeSessions: Map<string, QuizSession> = new Map();
-  private readonly MAX_QUESTIONS = 10;
+  private readonly DEFAULT_QUESTIONS = 10;
+  private readonly MIN_QUESTIONS = 1;
+  private readonly MAX_QUESTIONS = 50;
   private readonly SESSION_TIMEOUT = 15 * 60 * 1000; // 15 minutes
 
   constructor(apiKey: string) {
@@ -33,13 +36,23 @@ export class QuizManager {
   public async startQuiz(
     userId: string,
     channelId: string,
-    topic: string
+    topic: string,
+    numQuestions?: number
   ): Promise<string> {
     const sessionKey = this.getSessionKey(userId, channelId);
 
     // Check if user already has an active session
     if (this.activeSessions.has(sessionKey)) {
       return "⚠️ You already have an active quiz! Reply to my questions or use `!lyra quiz end` to end it.";
+    }
+
+    // Validate and set number of questions
+    const maxQuestions = numQuestions ?? this.DEFAULT_QUESTIONS;
+    if (maxQuestions < this.MIN_QUESTIONS) {
+      return `❌ Number of questions must be at least ${this.MIN_QUESTIONS}.`;
+    }
+    if (maxQuestions > this.MAX_QUESTIONS) {
+      return `❌ Number of questions cannot exceed ${this.MAX_QUESTIONS}.`;
     }
 
     try {
@@ -52,6 +65,7 @@ export class QuizManager {
         currentQuestion: "",
         questionsAsked: 0,
         correctAnswers: 0,
+        maxQuestions,
         startTime: new Date(),
       };
 
@@ -64,7 +78,7 @@ export class QuizManager {
 - If incorrect, provide the correct answer and explanation, then ask the next question
 - Keep questions at an appropriate difficulty level
 - Vary question types (multiple choice, true/false, short answer)
-- After ${this.MAX_QUESTIONS} questions, provide a final score summary
+- After ${maxQuestions} questions, provide a final score summary
 
 Start by asking the first question about "${topic}". Be friendly and encouraging!`;
 
@@ -98,7 +112,7 @@ Start by asking the first question about "${topic}". Be friendly and encouraging
         }
       }, this.SESSION_TIMEOUT);
 
-      return `🎯 **Quiz Started: ${topic}**\n\n**Question 1/${this.MAX_QUESTIONS}:**\n${questionText}\n\n*Reply to this message with your answer!*`;
+      return `🎯 **Quiz Started: ${topic}**\n\n**Question 1/${maxQuestions}:**\n${questionText}\n\n*Reply to this message with your answer!*`;
     } catch (error) {
       console.error("Error starting quiz:", error);
       return "❌ Failed to start quiz. Please try again.";
@@ -139,7 +153,7 @@ Start by asking the first question about "${topic}". Be friendly and encouraging
       }));
 
       const systemContext = `You are evaluating an answer in a quiz about "${session.topic}". 
-Current question number: ${session.questionsAsked}/${this.MAX_QUESTIONS}
+Current question number: ${session.questionsAsked}/${session.maxQuestions}
 Previous question was: "${session.currentQuestion}"
 
 Instructions:
@@ -189,8 +203,8 @@ Format your response as:
       }
 
       // Format response with question number
-      const questionNum = Math.min(session.questionsAsked + 1, this.MAX_QUESTIONS);
-      const formattedResponse = `${responseText}\n\n**Question ${questionNum}/${this.MAX_QUESTIONS}:**`;
+      const questionNum = Math.min(session.questionsAsked + 1, session.maxQuestions);
+      const formattedResponse = `${responseText}\n\n**Question ${questionNum}/${session.maxQuestions}:**`;
 
       return formattedResponse;
     } catch (error) {
@@ -211,7 +225,7 @@ Format your response as:
     this.activeSessions.delete(sessionKey);
 
     const percentage = Math.round(
-      (session.correctAnswers / this.MAX_QUESTIONS) * 100
+      (session.correctAnswers / session.maxQuestions) * 100
     );
     let grade = "📊";
     if (percentage >= 90) grade = "🏆";
@@ -219,7 +233,7 @@ Format your response as:
     else if (percentage >= 70) grade = "✅";
     else if (percentage >= 60) grade = "👍";
 
-    return `${grade} **Quiz Complete!**\n\n**Topic:** ${session.topic}\n**Score:** ${session.correctAnswers}/${this.MAX_QUESTIONS} (${percentage}%)\n**Time:** ${minutes}m ${seconds}s\n\n*Great job! Use \`!lyra quiz [topic]\` to start a new quiz.*`;
+    return `${grade} **Quiz Complete!**\n\n**Topic:** ${session.topic}\n**Score:** ${session.correctAnswers}/${session.maxQuestions} (${percentage}%)\n**Time:** ${minutes}m ${seconds}s\n\n*Great job! Use \`!lyra quiz [topic]\` to start a new quiz.*`;
   }
 
   /**
