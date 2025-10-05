@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { GenAILiveClient } from "@/lib/genai-live-client";
-import { LiveClientOptions } from "@/types";
+import { LiveClientOptions, FormattedResponse } from "@/types";
 import { AudioStreamer } from "@/lib/audio-streamer";
 import { audioContext } from "@/lib/utils";
 import VolMeterWorket from "@/lib/worklets/vol-meter";
@@ -32,6 +32,10 @@ export type UseLiveAPIResults = {
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
   volume: number;
+  // NEW: Response formatting results
+  voiceResponse: string | null;
+  textResponse: string | null;
+  formattedResponse: FormattedResponse | null;
 };
 
 export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
@@ -42,6 +46,11 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
   const [config, setConfig] = useState<LiveConnectConfig>({});
   const [connected, setConnected] = useState(false);
   const [volume, setVolume] = useState(0);
+  
+  // NEW: State for formatted responses
+  const [voiceResponse, setVoiceResponse] = useState<string | null>(null);
+  const [textResponse, setTextResponse] = useState<string | null>(null);
+  const [formattedResponse, setFormattedResponse] = useState<FormattedResponse | null>(null);
 
   // register audio for streaming server -> speakers
   useEffect(() => {
@@ -77,12 +86,31 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
     const onAudio = (data: ArrayBuffer) =>
       audioStreamerRef.current?.addPCM16(new Uint8Array(data));
 
+    // NEW: Handle formatted response events
+    const onVoiceResponse = (summary: string) => {
+      console.log("📢 Voice summary received:", summary.substring(0, 100));
+      setVoiceResponse(summary);
+    };
+
+    const onTextResponse = (analysis: string) => {
+      console.log("📝 Detailed analysis received:", analysis.substring(0, 100));
+      setTextResponse(analysis);
+    };
+
+    const onFormattedResponse = (formatted: FormattedResponse) => {
+      console.log("✅ Formatted response complete");
+      setFormattedResponse(formatted);
+    };
+
     client
       .on("error", onError)
       .on("open", onOpen)
       .on("close", onClose)
       .on("interrupted", stopAudioStreamer)
-      .on("audio", onAudio);
+      .on("audio", onAudio)
+      .on("voiceResponse", onVoiceResponse)
+      .on("textResponse", onTextResponse)
+      .on("formattedResponse", onFormattedResponse);
 
     return () => {
       client
@@ -91,6 +119,9 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
         .off("close", onClose)
         .off("interrupted", stopAudioStreamer)
         .off("audio", onAudio)
+        .off("voiceResponse", onVoiceResponse)
+        .off("textResponse", onTextResponse)
+        .off("formattedResponse", onFormattedResponse)
         .disconnect();
     };
   }, [client]);
@@ -106,6 +137,10 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
   const disconnect = useCallback(async () => {
     client.disconnect();
     setConnected(false);
+    // Clear formatted responses on disconnect
+    setVoiceResponse(null);
+    setTextResponse(null);
+    setFormattedResponse(null);
   }, [setConnected, client]);
 
   return {
@@ -118,5 +153,8 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
     connect,
     disconnect,
     volume,
+    voiceResponse,
+    textResponse,
+    formattedResponse,
   };
 }

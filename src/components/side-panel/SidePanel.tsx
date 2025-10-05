@@ -1,17 +1,5 @@
 /**
- * Copyright 2024 Google LLC
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Copyright 2024 Google LLC - Enhanced with Response Formatting Display
  */
 
 import "./react-select.scss";
@@ -31,7 +19,7 @@ const filterOptions = [
 ];
 
 export default function SidePanel() {
-  const { connected, client } = useLiveAPIContext();
+  const { connected, client, voiceResponse, textResponse } = useLiveAPIContext();
   const [open, setOpen] = useState(true);
   const loggerRef = useRef<HTMLDivElement>(null);
   const loggerLastHeightRef = useRef<number>(-1);
@@ -44,7 +32,7 @@ export default function SidePanel() {
   } | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  //scroll the log to the bottom when new logs come in
+  // Scroll the log to the bottom when new logs come in
   useEffect(() => {
     if (loggerRef.current) {
       const el = loggerRef.current;
@@ -56,7 +44,7 @@ export default function SidePanel() {
     }
   }, [logs]);
 
-  // listen for log events and store them
+  // Listen for log events and store them
   useEffect(() => {
     client.on("log", log);
     return () => {
@@ -121,6 +109,46 @@ export default function SidePanel() {
             : `⏸️${open ? " Paused" : ""}`}
         </div>
       </section>
+
+      {/* NEW: Display formatted responses */}
+      {(voiceResponse || textResponse) && (
+        <div style={{ 
+          padding: "10px", 
+          background: "var(--Neutral-10)", 
+          borderBottom: "1px solid var(--Neutral-20)",
+          maxHeight: "200px",
+          overflowY: "auto"
+        }}>
+          {voiceResponse && (
+            <div style={{ marginBottom: "10px" }}>
+              <strong style={{ color: "var(--Neutral-90)" }}>🎙️ Voicecat Summary:</strong>
+              <p style={{ 
+                margin: "5px 0", 
+                fontSize: "0.9em", 
+                color: "var(--Neutral-70)",
+                fontStyle: "italic" 
+              }}>
+                {voiceResponse}
+              </p>
+            </div>
+          )}
+          {textResponse && (
+            <div>
+              <strong style={{ color: "var(--Neutral-90)" }}>📝 Detailed Analysis:</strong>
+              <p style={{ 
+                margin: "5px 0", 
+                fontSize: "0.85em", 
+                color: "var(--Neutral-70)",
+                whiteSpace: "pre-wrap"
+              }}>
+                {textResponse.substring(0, 300)}
+                {textResponse.length > 300 && "..."}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="side-panel-container" ref={loggerRef}>
         <Logger
           filter={(selectedOption?.value as LoggerFilterType) || "none"}
