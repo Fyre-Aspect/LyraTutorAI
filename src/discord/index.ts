@@ -14,7 +14,7 @@ async function main() {
     token: process.env.DISCORD_BOT_TOKEN || "",
     geminiApiKey: process.env.GEMINI_API_KEY || "",
     model: process.env.GEMINI_MODEL || "models/gemini-2.0-flash-exp",
-    prefix: process.env.BOT_PREFIX || "!gemini",
+    prefix: process.env.BOT_PREFIX || "!lyra",
     liveConfig: {
       systemInstruction: {
         parts: [
@@ -50,7 +50,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log("🚀 Starting Gemini Discord Bot...");
+  console.log("🚀 Starting Lyra Discord Bot...");
   console.log(`📱 Model: ${config.model}`);
   console.log(`🎤 Voice: ${config.liveConfig?.generationConfig?.speechConfig?.voiceConfig?.prebuiltVoiceConfig?.voiceName}`);
   console.log(`📝 Prefix: ${config.prefix}`);
